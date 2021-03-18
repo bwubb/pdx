@@ -1,0 +1,320 @@
+import shutil
+import glob
+import os
+import errno
+import yaml
+from collections import defaultdict
+
+#Consider making a Fastq_pair and/or Mapped_Bam object and/or Input_Bam
+
+def mkdir_p(path):
+    try:
+        os.makedirs(path)
+    except OSError as exc: # Python >2.5
+        if exc.errno==errno.EEXIST and os.path.isdir(path):
+            pass
+
+if config['project'].get('fastq_config',False):
+    with open(config['project']['fastq_config']) as file:
+        FILES=yaml.load(file)
+        SAMPLES=sorted(list(FILES.keys()))
+    for sample in SAMPLES:
+        mkdir_p('logs/cluster/%s' % sample)
+else:
+    with open(config.get('project',{}).get('sample_list','samples.list'),'r') as infile:#sample_list in config, default is samples.list
+        SAMPLES=infile.read().splitlines()
+    #DATA=defaultdict(dict)
+    FILES=defaultdict(lambda: #RUN
+        defaultdict(lambda: #LANE
+            defaultdict(lambda: #INDEX
+                defaultdict(list))))
+    for sample in SAMPLES:
+        mkdir_p('logs/cluster/%s' % sample)
+        files=sorted(glob.glob('FASTQ/{sample}_*.fastq.gz'.format(sample=sample)))
+        assert all([len(files) >= 2,len(files) % 2 == 0]), 'Inproper number of files for {sample} : {files}'.format(sample=sample,files=files)
+        fq_pairs=zip(files[::2],files[1::2])
+        for p in fq_pairs:#mv to func elsewhere
+            for i,j in enumerate(p[0]):
+                if p[1][i]!=j:
+                    assert all([p[0][i]=='1',p[1][i]=='2']),'Fastq pairs {0} {1} do not appear properly paired'.format(*p)
+            name=os.path.basename(p[0]).rstrip('.fastq.gz').split('_')#fix for sample names with _
+            assert name[0]==sample,'{0} != {1}'.format(name[0],sample)
+            #Just write a samples.json which has all the bams by ref from fq pair, you are essentially making one
+            #DATA[sample].update({'bam_input/work/{SAMPLE}/{REF}/{RUN}/{LANE}/mapped.bam'.format(SAMPLE=sample,REF=config['resources']['reference']['key'],RUN=name[1],LANE=name[2]):{'run':name[1],'lane':name[2],'index':name[4],'R1':p[0],'R2':p[1]}})
+            FILES[sample][name[1]][name[2]][name[4]]=[p[0],p[1]]
+
+
+def map_input(wildcards):
+    inputs=[]
+    for RUN,_run in FILES[wildcards.sample].items():
+        for LANE,_lane in _run.items():
+            for INDEX in list(_lane.keys()):
+                inputs.append('bam_input/work/{wildcards.sample}/{wildcards.reference}/{run}/{lane}/{index}/mapped.bam'.format(wildcards=wildcards,run=RUN,lane=LANE,index=INDEX))
+    assert len(inputs)>0
+    return sorted(inputs)
+
+def map_input2(wildcards):
+    inputs=[]
+    for RUN,_run in list(FILES[wildcards.sample].items()):
+        run,lane,index=_run['PU'].split('-',2)
+        inputs.append(f'bam_input/work/{wildcards.sample}/{wildcards.reference}/{run}/{lane}/{index}/mapped.bam')
+    assert len(inputs)>0
+    return sorted(inputs)
+
+def get_fastqs(wildcards):
+    return {'R1':'FASTQ/'+FILES[wildcards.sample][f'{wildcards.run}-{wildcards.lane}']['files'][0],'R2':'FASTQ/'+FILES[wildcards.sample][f'{wildcards.run}-{wildcards.lane}']['files'][1]}
+    #return {'R1':FILES[wildcards.sample][wildcards.run][wildcards.lane][wildcards.index][0],'R2':FILES[wildcards.sample][wildcards.run][wildcards.lane][wildcards.index][1]}
+
+def flatten_dict(d):
+    def items():
+        for key, value in d.items():
+            if isinstance(value, dict):
+                for subkey, subvalue in flatten_dict(value).items():
+                    yield key + "_" + subkey, subvalue
+            else:
+                yield key, value
+    return dict(items())
+
+def ready_bam_input(wildcards):
+    bam="bam_input/work/{sample}/{reference}/recal.bam".format(sample=wildcards.sample,reference=config['resources']['reference']['key'])
+    table="bam_input/final/{sample}/metrics/{reference}/validation_data.table".format(sample=wildcards.sample,reference=config['resources']['reference']['key'])
+    return bam,table
+
+def sample_bam(wildcards):
+    if getattr(wildcards,'tumor',False):
+        name=wildcards.tumor
+    elif getattr(wildcards,'normal',False):
+        name=wildcards.normal
+    else:
+        name=wildcards.sample
+    if config['project'].get('bam_list',False):
+        return BAMS[name]
+    return 'bam_input/final/{sample}/{reference}/{sample}.ready.bam'.format(sample=name,reference=config['resources']['reference']['key'])
+
+def disambiguate_input(wildcards):
+    return {'A':'bam_input/work/{wildcards.sample}/{A}/input.bam'.format(wildcards=wildcards,A=config['resources']['reference']['key']),'B':'bam_input/work/{wildcards.sample}/{B}/input.bam'.format(wildcards=wildcards,B=config['resources']['disambiguate']['key'])}
+
+
+localrules: all
+
+#They have wrappers for a lot of bioinformatics stuff
+rule all:
+    input:
+        #sorted(['bam_input/work/{sample}/{reference}/input.{N}.bam'.format(sample=sample,reference=config['resources']['reference']['key'],N=len(list(iter(DATA[sample])))) for sample in iter(DATA)])
+        #sorted(["bam_input/final/{sample}/{reference}/{sample}.ready.bam.bai".format(sample=sample) for sample in iter(DATA)])
+        expand("bam_input/final/{sample}/{reference}/{sample}.ready.bam.bai",sample=SAMPLES,reference=config['resources']['reference']['key'])
+
+rule all_metrics:
+    input:
+        expand("bam_input/work/{sample}/metrics/{targets}/target.metrics",sample=SAMPLES,targets=config['resources']['library']['targets_key'])
+
+rule aln_pe:
+    input:
+        unpack(get_fastqs)
+    output:
+        "bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/mapped.bam"#hard coded ref
+    params:
+        LB=config['resources']['library']['library_key'],###here
+        fasta=config['resources']['reference']['fasta']#ref_key should get the fastq, right now its just a name holder and its not helping make one aln rule for each ref.
+    threads:
+        16
+    shell:
+        #fastq config has no path.
+        "bwa mem -M -t {threads} {params.fasta} {input.R1} {input.R2} | samtools addreplacerg -r 'ID:{wildcards.run}.{wildcards.lane}' -r 'PU:{wildcards.run}.{wildcards.lane}.{wildcards.index}' -r 'PL:illumina' -r 'LB:{params.LB}' -r 'SM:{wildcards.sample}' -@ {threads} - | samtools sort -@ {threads} -o {output}"
+    #picard --metrics_accumulation_level readgroup will look at PU and will only fall back to ID if it is null'
+    #Consider putting markdup in this as well. It outputs stats and multi threads. Per lane stats would be nice and HsMetrics will also do that.
+    #markdup would first need samtools fixmate -m
+
+rule mouse_aln_pe:
+    input:
+        unpack(get_fastqs)
+    output:
+        "bam_input/work/{sample}/mm10/{run}/{lane}/{index}/mapped.bam"
+    params:
+        LB=config['resources']['library']['library_key'],###here
+        fasta=config['resources']['disambiguate']['fasta']#ref_key should get the fastq, right now its just a name holder and its not helping make one aln rule for each ref.
+    threads:
+        16
+    shell:
+        #fastq config has no path.
+        "bwa mem -M -t {threads} {params.fasta} {input.R1} {input.R2} | samtools addreplacerg -r 'ID:{wildcards.run}.{wildcards.lane}' -r 'PU:{wildcards.run}.{wildcards.lane}.{wildcards.index}' -r 'PL:illumina' -r 'LB:{params.LB}' -r 'SM:{wildcards.sample}' -@ {threads} - | samtools sort -@ {threads} -o {output}"
+
+
+rule input_ready:
+    input:
+        map_input2
+    output:
+        "bam_input/work/{sample}/{reference}/input.bam"
+    run:
+        if len(input)==1:
+            shell("rsync {input} {output}")
+        else:
+            shell("samtools merge -f {output} {input}")
+
+rule disambiguate:
+    input:
+        unpack(disambiguate_input)
+    output:
+        "bam_input/work/{sample}/GRCh37/disambres/input.disambiguatedSpeciesA.bam"
+    params:
+        work_dir="bam_input/work/{sample}/GRCh37/disambres",
+        out_dir="bam_input/work/{sample}/GRCh37/disambres"
+    shell:
+        "disambiguate.py -i {params.work_dir} -o {params.out_dir} -a bwa --no-sort {input.A} {input.B}"
+
+rule MarkDuplicates:
+    input:
+        #"bam_input/work/{sample}/{reference}/disambres/input.disambiguatedSpeciesA.sorted.bam"
+        rules.disambiguate.output
+    output:
+        bam="bam_input/work/{sample}/{reference}/mDup.bam",
+        metrics="bam_input/final/{sample}/metrics/{reference}/mark_duplicates.table"
+    params:
+        memory="10240m"
+    shell:
+        "java -Xmx{params.memory} -jar $HOME/software/picard/build/libs/picard.jar MarkDuplicates I={input} O={output.bam} M={output.metrics} CREATE_INDEX=true VALIDATION_STRINGENCY=LENIENT"
+#        "gatk --java-options '-Xmx{params.memory}'"
+
+#Consider putting in FixMateInformation in
+#Or I need an on success
+
+rule RealignerTargetCreator:
+    input:
+        "bam_input/work/{sample}/{reference}/mDup.bam"
+    output:
+        "bam_input/work/{sample}/{reference}/IndelRealigner.intervals"
+    params:
+        memory="10240m",
+        reference=config['resources']['reference']['fasta'],
+        known=["/home/bwubb/b37_genomes/1000G_phase1.indels.b37.vcf","/home/bwubb/b37_genomes/Mills_and_1000G_gold_standard.indels.b37.vcf"]
+    shell:
+        "java -Xmx{params.memory} -jar $HOME/software/GenomeAnalysisTK-3.7/GenomeAnalysisTK.jar -R {params.reference} -T RealignerTargetCreator -I {input} -o {output} -known {params.known[0]} -known {params.known[1]}"
+
+rule IndelRealigner:
+    input:
+        bam="bam_input/work/{sample}/{reference}/mDup.bam",
+        targets="bam_input/work/{sample}/{reference}/IndelRealigner.intervals"
+    output:
+        "bam_input/work/{sample}/{reference}/realign.bam"
+    params:
+        memory="10240m",
+        reference=config['resources']['reference']['fasta'],
+        known=["/home/bwubb/b37_genomes/1000G_phase1.indels.b37.vcf","/home/bwubb/b37_genomes/Mills_and_1000G_gold_standard.indels.b37.vcf"]
+    shell:
+        "java -Xmx{params.memory} -jar $HOME/software/GenomeAnalysisTK-3.7/GenomeAnalysisTK.jar -R {params.reference} -T IndelRealigner -I {input.bam} -o {output} -targetIntervals {input.targets} -known {params.known[0]} -known {params.known[1]}"
+
+rule FirstPass_BaseRecalibrator:#update resources
+    input:
+        "bam_input/work/{sample}/{reference}/realign.bam"
+    output:
+        "bam_input/final/{sample}/metrics/{reference}/recal_data.table"
+    params:
+        memory="10240m",
+        reference=config['resources']['reference']['fasta'],
+        knownSites=["$HOME/b37_genomes/dbsnp_135.b37.vcf","$HOME/b37_genomes/1000G_phase1.indels.b37.vcf","$HOME/b37_genomes/Mills_and_1000G_gold_standard.indels.b37.vcf"]
+    shell:
+        "java -Xmx{params.memory} -jar $HOME/software/GenomeAnalysisTK-3.7/GenomeAnalysisTK.jar -R {params.reference} -T BaseRecalibrator -I {input} -o {output} -knownSites {params.knownSites[0]} -knownSites {params.knownSites[1]} -knownSites {params.knownSites[2]}"
+
+rule SecondPass_BaseRecalibrator:
+    input:
+        "bam_input/work/{sample}/{reference}/realign.bam",
+        "bam_input/final/{sample}/metrics/{reference}/recal_data.table"
+    output:
+        "bam_input/final/{sample}/metrics/{reference}/post_recal_data.table"
+    params:
+        memory="10240m",
+        reference=config['resources']['reference']['fasta'],
+        knownSites=["$HOME/b37_genomes/dbsnp_135.b37.vcf","$HOME/b37_genomes/1000G_phase1.indels.b37.vcf","$HOME/b37_genomes/Mills_and_1000G_gold_standard.indels.b37.vcf"]
+    shell:
+        "java -Xmx{params.memory} -jar $HOME/software/GenomeAnalysisTK-3.7/GenomeAnalysisTK.jar -R {params.reference} -T BaseRecalibrator -I {input[0]} -BQSR {input[1]} -o {output} -knownSites {params.knownSites[0]} -knownSites {params.knownSites[1]} -knownSites {params.knownSites[2]}"
+
+rule AnalyzeCovariates:
+    input:
+        before="bam_input/final/{sample}/metrics/{reference}/recal_data.table",
+        after="bam_input/final/{sample}/metrics/{reference}/post_recal_data.table"
+    output:
+        csv="bam_input/final/{sample}/metrics/BQSR.csv",
+        pdf="bam_input/final/{sample}/metrics/BQSR.pdf"
+    params:
+        memory="10240m",
+        reference=config['resources']['reference']['fasta'],
+        knownSites=["$HOME/b37_genomes/dbsnp_135.b37.vcf","$HOME/b37_genomes/1000G_phase1.indels.b37.vcf","$HOME/b37_genomes/Mills_and_1000G_gold_standard.indels.b37.vcf"]
+    shell:
+        "java -Xmx{params.memory} -jar $HOME/software/GenomeAnalysisTK-3.7/GenomeAnalysisTK.jar -R {params.reference} -T AnalyzeCovariates -before {input.before} -after {input.after} -csv {output.csv} -plots {output.pdf}"
+
+rule PrintReads:
+    input:
+        bam="bam_input/work/{sample}/{reference}/realign.bam",
+        bqsr="bam_input/final/{sample}/metrics/{reference}/recal_data.table"
+    output:
+        "bam_input/work/{sample}/{reference}/recal.bam"
+    params:
+        memory="1020m",
+        reference=config['resources']['reference']['fasta']
+    shell:
+        "java -Xmx{params.memory} -jar $HOME/software/GenomeAnalysisTK-3.7/GenomeAnalysisTK.jar -R {params.reference} -T PrintReads -I {input.bam} -BQSR {input.bqsr} -o {output}"
+
+rule ValidateSamFile:
+    input:
+        "bam_input/work/{sample}/{reference}/recal.bam"
+    output:
+        "bam_input/work/{sample}/{reference}/validation_data.table"
+    params:
+        memory="10240m"
+    shell:
+        "java -Xmx{params.memory} -jar $HOME/software/picard/build/libs/picard.jar ValidateSamFile I={input} O={output} MODE=SUMMARY IGNORE_WARNINGS=true"
+
+rule validation_pass:
+    input:
+        "bam_input/work/{sample}/{reference}/validation_data.table"
+    output:
+        "bam_input/final/{sample}/metrics/{reference}/validation_data.table"
+    run:
+        with open(input[0],'r') as file:
+            lines=file.read().splitlines()
+        if all(not x.startswith('ERROR') for x in lines):
+            shutil.copyfile(input[0],output[0])
+        else:
+            for x in lines:
+                if x.startswith('ERROR'):
+                    print(x)
+
+rule ready_bam:
+    input:
+        #ready_bam_input
+        bam="bam_input/work/{sample}/{reference}/recal.bam",
+        table="bam_input/final/{sample}/metrics/{reference}/validation_data.table"
+    output:
+        "bam_input/final/{sample}/{reference}/{sample}.ready.bam"
+    shell:
+        "rsync -v {input.bam} {output}"
+
+rule index_ready:
+    input:
+        "bam_input/final/{sample}/{reference}/{sample}.ready.bam"
+    output:
+        "bam_input/final/{sample}/{reference}/{sample}.ready.bam.bai"
+    shell:
+        "samtools index {input}"
+
+rule CollectHsMetrics:
+    input:
+        sample_bam
+    output:
+        "bam_input/work/{sample}/metrics/{targets}/target.metrics"
+    params:
+        reference=config['resources']['reference']['fasta'],
+        baits=config['resources']['library']['picard_intervals'],
+        targets=config['resources']['library']['picard_intervals'],
+        memory="10g"
+    shell:
+        "gatk --java-options '-Xmx{params.memory}' CollectHsMetrics -R {params.reference} -I {input} -O {output} -BI {params.baits} -TI {params.targets} --METRIC_ACCUMULATION_LEVEL READ_GROUP --VALIDATION_STRINGENCY LENIENT"
+
+#--METRIC_ACCUMULATION_LEVEL READ_GROUP
+#--PER_TARGET_COVERAGE:File
+
+#rule bam_list:
+#    input:
+#    output:
+#    params:
+#    run:

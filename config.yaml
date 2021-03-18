@@ -1,0 +1,13 @@
+
+project:
+    name: ''
+    fastq_list: 'fastqs.yaml'
+reference:
+    fasta: '/home/bwubb/resources/Genomes/Human/GRCh37/human_g1k_v37.fasta'
+    key: 'GRCh37'
+resources:
+    library_key: ''
+    targets_key: ''
+    targets_bed: ''
+    targets_intervals: ''
+    piacrd_intervals: ''
