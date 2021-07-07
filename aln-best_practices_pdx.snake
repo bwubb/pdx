@@ -1,48 +1,59 @@
-import shutil
-import glob
 import os
-import errno
 import yaml
 from collections import defaultdict
 
-def mkdir_p(path):
-    try:
-        os.makedirs(path)
-    except OSError as exc: # Python >2.5
-        if exc.errno==errno.EEXIST and os.path.isdir(path):
-            pass
+### FUNCTIONS ###
 
 def map_input(wildcards):
     inputs=[]
     for RUN,_run in list(FILES[wildcards.sample].items()):
         run,lane,index=_run['PU'].split('-',2)
-        #inputs.append(f'bam_input/work/{wildcards.sample}/{wildcards.reference}/{run}/{lane}/{index}/disambiguated.bam')
-        inputs.append(f"bam_input/work/{wildcards.sample}/GRCh37/{run}/{lane}/{index}/mapped.disambiguatedSpeciesA.bam")
+        inputs.append(f'bam_input/work/{wildcards.sample}/{wildcards.reference}/{run}/{lane}/{index}/disambiguated.bam')
     assert len(inputs)>0
     return sorted(inputs)
 
 def get_fastqs(wildcards):
     return {'R1':'FASTQ/'+FILES[wildcards.sample][f'{wildcards.run}-{wildcards.lane}']['files'][0],'R2':'FASTQ/'+FILES[wildcards.sample][f'{wildcards.run}-{wildcards.lane}']['files'][1]}
-    #return {'R1':FILES[wildcards.sample][wildcards.run][wildcards.lane][wildcards.index][0],'R2':FILES[wildcards.sample][wildcards.run][wildcards.lane][wildcards.index][1]}
+    #fastq.yaml does not currently include file paths.
 
 ### ### PYTHON ### ###
+
 with open(config['project']['fastq_config']) as file:
-    FILES=yaml.load(file)
+    FILES=yaml.load(file,Loader=yaml.BaseLoader)
     SAMPLES=sorted(list(FILES.keys()))
     for sample in SAMPLES:
-        mkdir_p('logs/cluster/%s' % sample)
+        os.makedirs(f'logs/cluster/{sample}',exist_ok=True)
 
 ### ### ### RULES ### ### ###
+#Consider making bams.table the desired result.
 
 rule all:
     input:
-        expand("bam_input/final/{sample}/{reference}/{sample}.ready.bam",sample=SAMPLES,reference=config['reference']['key'])
+        expand("bam_input/final/{sample}/{reference}/{sample}.bam",sample=SAMPLES,reference=config['reference']['key'])
+
+#check if bbmap is installed?
+
+rule bbsplit:
+    input:
+        unpack(get_fastq)
+    output:
+        out_x=WM4023_S31285117_FGC2238_1_GAATTCGT-ATAGAGGC.GRCh37.fastq.gz,
+        out_y=WM4023_S31285117_FGC2238_1_GAATTCGT-ATAGAGGC.mm10.fastq.gz,
+        refstats="metrics/{sample}/"
+    params:
+        ref_p="/home/bwubb/resources/Genomes/PDX/"
+    threads:
+        8
+    shell:
+        """
+        bbsplit.sh path={params.ref_p} in1={input.R1} in2={input.R2} out_x= out_y= refstats=
+        """
 
 rule human_aln_pe:#speciesA
     input:
         unpack(get_fastqs)
     output:
-        "bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/mapped.bam"
+        temp("bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/mapped.bam")
     params:
         LB=config['resources']['library_key'],
         fasta=config['reference']['fasta']
@@ -55,7 +66,7 @@ rule mouse_aln_pe:#species B
     input:
         unpack(get_fastqs)
     output:
-        "bam_input/work/{sample}/mm10/{run}/{lane}/{index}/mapped.bam"
+        temp("bam_input/work/{sample}/mm10/{run}/{lane}/{index}/mapped.bam")
     params:
         LB=config['resources']['library_key'],
         fasta=config['disambiguate']['fasta']#ref_key could get the fastq
@@ -71,18 +82,52 @@ rule disambiguate:
         A="bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/mapped.bam",
         B="bam_input/work/{sample}/mm10/{run}/{lane}/{index}/mapped.bam"
     output:
-        A="bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/mapped.disambiguatedSpeciesA.bam",
-        B="bam_input/work/{sample}/mm10/{run}/{lane}/{index}/mapped.disambiguatedSpeciesB.bam"
+        A=temp("bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/mapped.disambiguatedSpeciesA.bam"),
+        B=temp("bam_input/work/{sample}/mm10/{run}/{lane}/{index}/mapped.disambiguatedSpeciesB.bam")
     params:
         work_dir="bam_input/work/{sample}/disambres",
-        A="bam_input/work/{sample}/disambres/mapped.disambiguatedSpeciesA.bam",
-        B="bam_input/work/{sample}/disambres/mapped.disambiguatedSpeciesB.bam"
+        A=temp("bam_input/work/{sample}/disambres/mapped.disambiguatedSpeciesA.bam"),
+        B=temp("bam_input/work/{sample}/disambres/mapped.disambiguatedSpeciesB.bam")
     shell:
         """
-        disambiguate.py -i {params.work_dir} -o {params.work_dir} -a bwa --no-sort {input.A} {input.B}
+        python disambiguate.py -i {params.work_dir} -o {params.work_dir} -a bwa --no-sort {input.A} {input.B}
         rsync {params.A} {output.A}
+        #samtools index {output.A}
         rsync {params.B} {output.B}
+        #samtools index {output.B}
         """
+'''
+#BBSplit
+#Written by Brian Bushnell, from Dec. 2010 - present
+#Last modified June 11, 2018
+
+#Description:  Maps reads to multiple references simultaneously.
+#Outputs reads to a file for the reference they best match, with multiple options for dealing with ambiguous mappings.
+
+#To index:     bbsplit.sh build=<1> ref_x=<reference fasta> ref_y=<another reference fasta>
+#To map:       bbsplit.sh build=<1> in=<reads> out_x=<output file> out_y=<another output file>
+
+#To be concise, and do everything in one command:
+#bbsplit.sh ref=x.fa,y.fa in=reads.fq basename=o%.fq
+
+#that is equivalent to
+#bbsplit.sh build=1 in=reads.fq ref_x=x.fa ref_y=y.fa out_x=ox.fq out_y=oy.fq
+
+#By default paired reads will yield interleaved output, but you can use the # symbol to produce twin output files.
+#For example, basename=o%_#.fq will produce ox_1.fq, ox_2.fq, oy_1.fq, and oy_2.fq.
+
+#Indexing Parameters (required when building the index):
+#ref=<file,file>     A list of references, or directories containing fasta files.
+#ref_<name>=<ref.fa> Alternate, longer way to specify references. e.g., ref_ecoli=ecoli.fa
+#                    These can also be comma-delimited lists of files; e.g., ref_a=a1.fa,a2.fa,a3.fa
+#build=<1>           If multiple references are indexed in the same directory, each needs a unique build ID.
+#path=<.>            Specify the location to write the index, if you dont want it in the current working directory.
+
+#Input Parameters:
+#build=<1>           Designate index to use.  Corresponds to the number specified when building the index.
+#in=<reads.fq>       Primary reads input; required parameter.
+#in2=<reads2.fq>     For paired reads in two files.
+'''
 
 #Verify I need this after I fixed no-sort issue
 #bams SHOULD be name sorted and they were not
@@ -90,14 +135,14 @@ rule reformat_and_repair:
     input:
         "bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/mapped.disambiguatedSpeciesA.bam"
     output:
-        R1="bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/disambiguated_R1.fastq",
-        R2="bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/disambiguated_R2.fastq"
+        R1=temp("bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/disambiguated_R1.fastq"),
+        R2=temp("bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/disambiguated_R2.fastq")
     params:
-        qsort="bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/qSortA.bam"
+        qsort=temp("bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/qSortA.bam")
     shell:
         """
-        samtools sort -n -o {params.qsort} {input}
-        reformat.sh -Xmx5g in={params.qsort} out=stdout.fq |
+        #samtools sort -n -o {params.qsort} {input}
+        reformat.sh -Xmx5g in={input} out=stdout.fq |
         reformat.sh -Xmx5g int=t addcolon=t uniquenames=t in=stdin.fq out=stdout.fq |
         repair.sh -Xmx5g in=stdin.fq out1={output.R1} out2={output.R2}
         """
@@ -109,12 +154,12 @@ rule aln_pe:
         R1="bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/disambiguated_R1.fastq",
         R2="bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/disambiguated_R2.fastq"
     output:
-        "bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/disambiguated.bam"
+        temp("bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/disambiguated.bam")
     params:
         LB=config['resources']['library_key'],
         fasta=config['reference']['fasta']
     threads:
-        16
+        8
     shell:
         "bwa mem -M -t {threads} {params.fasta} {input.R1} {input.R2} | samtools addreplacerg -r 'ID:{wildcards.run}.{wildcards.lane}' -r 'PU:{wildcards.run}.{wildcards.lane}.{wildcards.index}' -r 'PL:illumina' -r 'LB:{params.LB}' -r 'SM:{wildcards.sample}' -@ {threads} - | samtools sort -@ {threads} -o {output}"
     #picard --metrics_accumulation_level readgroup will look at PU and will only fall back to ID if it is null'
@@ -125,9 +170,9 @@ rule input_ready:
     input:
         map_input
     output:
-        "bam_input/work/{sample}/{reference}/sort.bam"
+        temp("bam_input/work/{sample}/{reference}/sort.bam")
     params:
-        input="bam_input/work/{sample}/{reference}/input.bam"
+        input=temp("bam_input/work/{sample}/{reference}/input.bam")
     run:
         if len(input)==1:
             shell("rsync {input} {params.input}")
@@ -140,12 +185,12 @@ rule MarkDuplicates:
     input:
         "bam_input/work/{sample}/{reference}/sort.bam"
     output:
-        bam="bam_input/work/{sample}/{reference}/mDup.bam",
+        bam=temp("bam_input/work/{sample}/{reference}/mDup.bam"),
         metrics="bam_input/final/{sample}/metrics/{reference}/mark_duplicates.table"
     params:
         memory="10240m"
     shell:
-        "java -Xmx{params.memory} -jar $HOME/software/picard/2.20.2/picard.jar MarkDuplicates I={input} O={output.bam} M={output.metrics} CREATE_INDEX=true VALIDATION_STRINGENCY=LENIENT"
+        "java -Xmx{params.memory} -jar $HOME/software/picard/2.20.7/picard.jar MarkDuplicates I={input} O={output.bam} M={output.metrics} CREATE_INDEX=true VALIDATION_STRINGENCY=LENIENT"
 
 rule RealignerTargetCreator:
     input:
@@ -155,7 +200,7 @@ rule RealignerTargetCreator:
     params:
         memory="10240m",
         reference=config['reference']['fasta'],
-        known=["/home/bwubb/resources/gatk/1000G_phase1.indels.b37.vcf","/home/bwubb/resources/gatk/Mills_and_1000G_gold_standard.indels.b37.vcf"]
+        known=["$HOME/resources/gatk/1000G_phase1.indels.b37.vcf","$HOME/resources/gatk/Mills_and_1000G_gold_standard.indels.b37.vcf"]
     shell:
         "java -Xmx{params.memory} -jar $HOME/software/GenomeAnalysisTK-3.7/GenomeAnalysisTK.jar -R {params.reference} -T RealignerTargetCreator -I {input} -o {output} -known {params.known[0]} -known {params.known[1]}"
 
@@ -164,11 +209,11 @@ rule IndelRealigner:
         bam="bam_input/work/{sample}/{reference}/mDup.bam",
         targets="bam_input/work/{sample}/{reference}/IndelRealigner.intervals"
     output:
-        "bam_input/work/{sample}/{reference}/realign.bam"
+        temp("bam_input/work/{sample}/{reference}/realign.bam")
     params:
         memory="10240m",
         reference=config['reference']['fasta'],
-        known=["/home/bwubb/resources/gatk/1000G_phase1.indels.b37.vcf","/home/bwubb/resources/gatk/Mills_and_1000G_gold_standard.indels.b37.vcf"]
+        known=["$HOME/resources/gatk/1000G_phase1.indels.b37.vcf","$HOME/resources/gatk/Mills_and_1000G_gold_standard.indels.b37.vcf"]
     shell:
         "java -Xmx{params.memory} -jar $HOME/software/GenomeAnalysisTK-3.7/GenomeAnalysisTK.jar -R {params.reference} -T IndelRealigner -I {input.bam} -o {output} -targetIntervals {input.targets} -known {params.known[0]} -known {params.known[1]}"
 
@@ -180,7 +225,7 @@ rule FirstPass_BaseRecalibrator:#update resources
     params:
         memory="10240m",
         reference=config['reference']['fasta'],
-        knownSites=["/home/bwubb/resources/gatk/dbsnp_138.b37.vcf","/home/bwubb/resources/gatk/1000G_phase1.indels.b37.vcf","/home/bwubb/resources/gatk/Mills_and_1000G_gold_standard.indels.b37.vcf"]
+        knownSites=["$HOME/resources/gatk/dbsnp_138.b37.vcf","$HOME/resources/gatk/1000G_phase1.indels.b37.vcf","$HOME/resources/gatk/Mills_and_1000G_gold_standard.indels.b37.vcf"]
     shell:
         "java -Xmx{params.memory} -jar $HOME/software/GenomeAnalysisTK-3.7/GenomeAnalysisTK.jar -R {params.reference} -T BaseRecalibrator -I {input} -o {output} -knownSites {params.knownSites[0]} -knownSites {params.knownSites[1]} -knownSites {params.knownSites[2]}"
 
@@ -193,7 +238,7 @@ rule SecondPass_BaseRecalibrator:
     params:
         memory="10240m",
         reference=config['reference']['fasta'],
-        knownSites=["/home/bwubb/resources/gatk/dbsnp_138.b37.vcf","/home/bwubb/resources/gatk/1000G_phase1.indels.b37.vcf","/home/bwubb/resources/gatk/Mills_and_1000G_gold_standard.indels.b37.vcf"]
+        knownSites=["$HOME/resources/gatk/dbsnp_138.b37.vcf","$HOME/resources/gatk/1000G_phase1.indels.b37.vcf","$HOME/resources/gatk/Mills_and_1000G_gold_standard.indels.b37.vcf"]
     shell:
         "java -Xmx{params.memory} -jar $HOME/software/GenomeAnalysisTK-3.7/GenomeAnalysisTK.jar -R {params.reference} -T BaseRecalibrator -I {input[0]} -BQSR {input[1]} -o {output} -knownSites {params.knownSites[0]} -knownSites {params.knownSites[1]} -knownSites {params.knownSites[2]}"
 
@@ -207,7 +252,7 @@ rule AnalyzeCovariates:
     params:
         memory="10240m",
         reference=config['reference']['fasta'],
-        knownSites=["/home/bwubb/resources/gatk/dbsnp_135.b37.vcf","/home/bwubb/resources/gatk/1000G_phase1.indels.b37.vcf","/home/bwubb/resources/gatk/Mills_and_1000G_gold_standard.indels.b37.vcf"]
+        knownSites=["$HOME/resources/gatk/dbsnp_135.b37.vcf","$HOME/resources/gatk/1000G_phase1.indels.b37.vcf","$HOME/resources/gatk/Mills_and_1000G_gold_standard.indels.b37.vcf"]
     shell:
         "java -Xmx{params.memory} -jar $HOME/software/GenomeAnalysisTK-3.7/GenomeAnalysisTK.jar -R {params.reference} -T AnalyzeCovariates -before {input.before} -after {input.after} -csv {output.csv} -plots {output.pdf}"
 
@@ -216,7 +261,7 @@ rule PrintReads:
         bam="bam_input/work/{sample}/{reference}/realign.bam",
         bqsr="bam_input/final/{sample}/metrics/{reference}/recal_data.table"
     output:
-        "bam_input/work/{sample}/{reference}/recal.bam"
+        temp("bam_input/work/{sample}/{reference}/recal.bam")
     params:
         memory="1020m",
         reference=config['reference']['fasta']
@@ -232,39 +277,30 @@ rule ValidateSamFile:
     params:
         memory="10240m"
     shell:
-        "java -Xmx{params.memory} -jar $HOME/software/picard/2.20.2/picard.jar ValidateSamFile I={input} O={output} MODE=SUMMARY"
-        #"""
-        #set +e
-        #java -Xmx{params.memory} -jar $HOME/software/picard/2.20.2/picard.jar ValidateSamFile I={input} O={output} MODE=SUMMARY
-        #exitcode=$?
-        #if [ $exitcode -eq -1 ]
-        #then
-        #    exit 1
-        #else
-        #    exit 0
-        #"""
+        "java -Xmx{params.memory} -jar $HOME/software/picard/2.20.7/picard.jar ValidateSamFile I={input} O={output} MODE=SUMMARY"
 
 rule validation_pass:
     input:
         "bam_input/work/{sample}/{reference}/validation_data.table"
     output:
-        "bam_input/final/{sample}/metrics/{reference}/validation_data.table"
-    run:
-        with open(input[0],'r') as file:
-            lines=file.read().splitlines()
-        if all(not x.startswith('ERROR') for x in lines):
-            shutil.copyfile(input[0],output[0])
-        else:
-            for x in lines:
-                if x.startswith('ERROR'):
-                    print(x)
+        "bam_input/final/{sample}/{reference}/validation_data.table"
+    shell:
+        """
+        set +H
+        if egrep -q 'No errors found' {input[0]}; then
+            cp {input[0]} {output[0]}
+        else
+            egrep '^ERROR' {input[0]}
+            exit 1
+        fi
+        """
 
 rule ready_bam:
     input:
         bam="bam_input/work/{sample}/{reference}/recal.bam",
-        table="bam_input/final/{sample}/metrics/{reference}/validation_data.table"
+        table="bam_input/final/{sample}/{reference}/validation_data.table"
     output:
-        "bam_input/final/{sample}/{reference}/{sample}.ready.bam"
+        "bam_input/final/{sample}/{reference}/{sample}.bam"
     shell:
         """
         rsync -v {input.bam} {output}

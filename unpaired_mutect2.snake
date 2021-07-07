@@ -1,4 +1,4 @@
-
+import yaml
 import re
 import glob
 import os
@@ -48,10 +48,10 @@ def infer_cohort_match():
 #        FASTQ=yaml.load(file)
 
 
-normals_cohort_input=infer_normal_cohorts()
-assert len(normals_cohort_input)>0
-matched_cohort=infer_cohort_match()
-with open('tumors.list','r') as file:
+#normals_cohort_input=infer_normal_cohorts()
+#assert len(normals_cohort_input)>0
+#matched_cohort=infer_cohort_match()
+with open('tumor.list','r') as file:
     TUMORS=file.read().splitlines()
 
 def bam_input(wildcards):
@@ -60,8 +60,26 @@ def bam_input(wildcards):
     except AttributeError:
         return 'bam_input/final/{tumor}/{reference}/{tumor}.ready.bam'.format(tumor=wildcards.tumor,reference=config['reference']['key'])
 
+
+#def pon_input(wildcards):
+#    return normals_cohort_input[wildcards.cohort]
+
 def pon_input(wildcards):
-    return normals_cohort_input[wildcards.cohort]
+    #with open(config['project']['pon_config'],'r') as p:
+    #    PON=yaml.load(p,Loader=yaml.BaseLoader)
+    with open(f"{config['project']['normal_list']}",'r') as file:
+        NORMALS=file.read().splitlines()
+    return [f"data/work/{config['resources']['targets_key']}/{sample}/mutect2/normal.vcf.gz" for sample in NORMALS]
+
+
+with open(config.get('project',{}).get('bam_table','bam.table'),'r') as b:
+    BAMS=dict(line.split('\t') for line in b.read().splitlines())
+
+def sample_bam(wildcards):
+    return BAMS[wildcards.sample]
+
+def tumor_bam(wildcards):
+    return BAMS[wildcards.tumor]
 
 def unpaired_input(wildcards):
     return matched_cohort[wildcards.tumor]
@@ -73,11 +91,11 @@ wildcard_constraints:
 
 rule all:
     input:
-        expand('data/work/{targets}/{tumor}/mutect2/somatic.pass.vcf.gz',tumor=TUMORS,targets=config['resources']['targets_key'])
+        expand('data/work/{targets}/{tumor}/annovar/mutect2.hg19_multianno.report.tsv',tumor=TUMORS,targets=config['resources']['targets_key'])
 
 rule normal_detection:
     input:
-        bam_input
+        sample_bam
     output:
         '{work_dir}/{sample}/mutect2/normal.vcf.gz'
     params:
@@ -92,7 +110,7 @@ rule pon_creation:
     input:
         pon_input
     output:
-        '{work_dir}/{cohort}/mutect2/pon.vcf.gz'
+        'project_data/mutect2/pon.vcf.gz'
     params:
         V=lambda wildcards,input:' '.join(['--variant %s' % v for v in input]),
         reference=config['reference']['fasta'],
@@ -102,8 +120,8 @@ rule pon_creation:
 
 rule Unpaired_Mutect2:
     input:
-        tumor=bam_input,
-        pon=unpaired_input
+        tumor=tumor_bam,
+        pon='project_data/mutect2/pon.vcf.gz'
     output:
         '{work_dir}/{tumor}/mutect2/somatic.vcf.gz'
     params:
@@ -126,3 +144,29 @@ rule Select_Filter:
     shell:
         #aU?
         'bcftools view -f PASS -O z -o {output} {input}'
+
+rule annotate_mutect2:
+    input:
+        "{work_dir}/{tumor}/mutect2/somatic.pass.vcf.gz"
+    output:
+        "{work_dir}/{tumor}/annovar/mutect2.hg19_multianno.vcf.gz"
+    params:
+        out_p="{work_dir}/{tumor}/annovar/mutect2",
+        humandb="/home/bwubb/resources/annovar/humandb"
+    shell:
+        """
+        table_annovar.pl {input} {params.humandb} --buildver hg19 --vcfinput --outfile {params.out_p} --protocol refGene,cytoband,genomicSuperDups,dbscsnv11,avsnp150,dbnsfp35a,mcap,revel,popfreq_max_20150413,exac03,exac03nontcga,gnomad211_exome,intervar_20180118,icgc21,cosmic84_coding,cosmic84_noncoding,clinvar_20190305 --operation g,r,r,f,f,f,f,f,f,f,f,f,f,f,f,f,f -remove
+        bgzip {params.out_p}.hg19_multianno.vcf
+        tabix -fp vcf {output}
+        """
+
+rule run_annovartools_mutect2:
+    input:
+        "{work_dir}/{tumor}/annovar/mutect2.hg19_multianno.vcf.gz"
+    output:
+        "{work_dir}/{tumor}/annovar/mutect2.hg19_multianno.report.tsv"
+    params:
+        header='/home/bwubb/resources/annovar/annotation-header.20210208.txt',
+        mode='single'
+    shell:
+        'python annovartools.v03.py -I {input} -O {output} --header {params.header} -m {params.mode} {wildcards.tumor}'

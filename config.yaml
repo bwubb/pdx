@@ -1,13 +1,20 @@
 
 project:
     name: ''
-    fastq_list: 'fastqs.yaml'
+    fastq_config: 'fastq.yaml'
+    sample_list: 'sample.list'
+    normals_list: 'normal.list'
+    bam_table: 'bam.table'
 reference:
     fasta: '/home/bwubb/resources/Genomes/Human/GRCh37/human_g1k_v37.fasta'
     key: 'GRCh37'
+disambiguate:
+    fasta: '/home/bwubb/resources/Genomes/Mouse/mm10/mm10.fa.gz'
+    key: 'mm10'
+    ref_p: '/home/bwubb/resources/PDX'
 resources:
     library_key: ''
     targets_key: ''
     targets_bed: ''
     targets_intervals: ''
-    piacrd_intervals: ''
+    picard_intervals: ''
