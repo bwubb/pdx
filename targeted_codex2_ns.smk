@@ -11,7 +11,7 @@ def mkdir_p(path):
 with open(config['project']['sample_list'],'r') as i:
     SAMPLES=i.read().splitlines()
 
-with open(config['project']['bam_list'],'r') as b:
+with open(config['project']['bam_table'],'r') as b:
     BAMS=dict(line.split('\t') for line in b.read().splitlines())
 
 for sample in SAMPLES:

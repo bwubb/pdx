@@ -1,23 +1,27 @@
-library(CODEX2)
+#!/usr/bin/Rscript --vanilla
+library("argparse")
 ##########################################################
-# Initialization
+# Arguments
 ##########################################################
 
-if (exists("snakemake")) {
-    all_bams<-as.character(snakemake@input)
-    head(snakemake@input)
-    projectname<-snakemake@params[['project']] #should be dir and not a prefix
-    bedFile<-snakemake@params[['bed']]
-    #print("YO",snakemake@params[['bed']])
-    normal_samples<-read.table(file=snakemake@params[['normals']])
-}else{
-    args = commandArgs(trailingOnly=TRUE)
-    print("No snakmake found")
-    projectname<-paste("data","work",args[1],"codex2",sep="/")
-    bedFile<-args[2]
-    all_bams<-as.character(read.table(file=args[3])$V2)
-    normal_samples<-as.character(read.table(file=args[4])$V1)
-}
+p<-ArgumentParser()
+p$add_argument('--output_dir',help="Path to put all output files.")
+p$add_argument('--bed_file',help='Bedfile of capture targets.')
+p$add_argument('--bam_table',help='TSV of samples and path to their bam files.')
+p$add_argument('--normal_list',help='File.list of samples to be used for normalization.')
+#args=p$parse_args(c("--output_dir","codex2","--bed_file","/home/bwubb/resources/Bed_files/MelanomaTargeted_v3.S3094091.Covered.bed","--bam_table","bam.table","--normal_list","normal.list"))
+args<-p$parse_args()
+
+##########################################################
+# Init
+##########################################################
+projectname<-args$output_dir
+dir.create(file.path(projectname),showWarnings=FALSE)
+
+bedFile<-args$bed_file
+all_bams<-as.character(read.table(file=args$bam_table)$V2)
+normal_samples<-as.character(read.table(file=args$normal_list)$V1)
+
 print("Project")
 print(projectname)
 print("Bed file")
@@ -25,11 +29,13 @@ print(bedFile)
 print("Bam Files")
 head(all_bams)
 
-
-sampname<-gsub('.ready.bam','',basename(all_bams))
-bambedObj <- getbambed(bamdir=all_bams,bedFile=bedFile,sampname=sampname,projectname=projectname)
-bamdir <- bambedObj$bamdir; sampname <- bambedObj$sampname
-ref <- bambedObj$ref; projectname <- bambedObj$projectname
+library("CODEX2")
+sampname<-gsub('.bam','',basename(all_bams))
+bambedObj<-getbambed(bamdir=all_bams,bedFile=bedFile,sampname=sampname,projectname=projectname)
+bamdir<-bambedObj$bamdir
+sampname<-bambedObj$sampname
+ref<-bambedObj$ref
+projectname<-bambedObj$projectname
 
 ##########################################################
 # Getting GC content and mappability
@@ -112,7 +118,7 @@ for(genei in unique(ref_qc$gene)){
   yi=Y_qc[geneindex,, drop=FALSE]
   yhati=Yhat[[optK]][geneindex,, drop=FALSE]
   refi=ref_qc[geneindex]
-  finalcalli=segment_targeted(yi, yhati, sampname_qc, refi, genei, lmax=length(geneindex), mode='fraction') 
+  finalcalli=segment_targeted(yi, yhati, sampname_qc, refi, genei, lmax=length(geneindex), mode='fraction')
   finalcall=rbind(finalcall,finalcalli)
 }
 cn=(as.numeric(as.matrix(finalcall[,'copy_no'])))

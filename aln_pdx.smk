@@ -8,13 +8,16 @@ def map_input(wildcards):
     inputs=[]
     for RUN,_run in list(FILES[wildcards.sample].items()):
         run,lane,index=_run['PU'].split('-',2)
-        inputs.append(f'bam_input/work/{wildcards.sample}/{wildcards.reference}/{run}/{lane}/{index}/disambiguated.bam')
+        inputs.append(f'bam_input/work/{wildcards.sample}/{wildcards.reference}/{run}/{lane}/{index}/mapped.bam')
     assert len(inputs)>0
     return sorted(inputs)
 
 def get_fastqs(wildcards):
     return {'R1':'FASTQ/'+FILES[wildcards.sample][f'{wildcards.run}-{wildcards.lane}']['files'][0],'R2':'FASTQ/'+FILES[wildcards.sample][f'{wildcards.run}-{wildcards.lane}']['files'][1]}
     #fastq.yaml does not currently include file paths.
+
+def disambiguated_fastqs(wildcards):
+    return {'x':f"bam_input/work/{wildcards.sample}/disambiguate/{wildcards.sample}_{config['resources']['targets_key']}_{wildcards.run}_{wildcards.lane}_{wildcards.index}.{config['reference']['key']}.fastq.gz",'y':f"bam_input/work/{wildcards.sample}/disambiguate/{wildcards.sample}_{config['resources']['targets_key']}_{wildcards.run}_{wildcards.lane}_{wildcards.index}.{config['disambiguate']['key']}.fastq.gz"}
 
 ### ### PYTHON ### ###
 
@@ -33,128 +36,42 @@ rule all:
 
 #check if bbmap is installed?
 
+#How do I generalize this output?
+#params memory is the wrong thing. I need the actual snakemake memory
 rule bbsplit:
     input:
-        unpack(get_fastq)
-    output:
-        out_x=WM4023_S31285117_FGC2238_1_GAATTCGT-ATAGAGGC.GRCh37.fastq.gz,
-        out_y=WM4023_S31285117_FGC2238_1_GAATTCGT-ATAGAGGC.mm10.fastq.gz,
-        refstats="metrics/{sample}/"
-    params:
-        ref_p="/home/bwubb/resources/Genomes/PDX/"
-    threads:
-        8
-    shell:
-        """
-        bbsplit.sh path={params.ref_p} in1={input.R1} in2={input.R2} out_x= out_y= refstats=
-        """
-
-rule human_aln_pe:#speciesA
-    input:
         unpack(get_fastqs)
     output:
-        temp("bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/mapped.bam")
+        x="bam_input/work/{sample}/disambiguate/{sample}_{lib}_{run}_{lane}_{index}.GRCh37.fastq.gz",
+        y="bam_input/work/{sample}/disambiguate/{sample}_{lib}_{run}_{lane}_{index}.mm10.fastq.gz",
+        refstats="metrics/{sample}/{sample}_{lib}_{run}_{lane}_{index}.refstats"
     params:
-        LB=config['resources']['library_key'],
-        fasta=config['reference']['fasta']
-    threads:
-        8
+        ref_p=config['disambiguate']['ref_p'],
+        memory="61440m"
     shell:
-        "bwa mem -M -t {threads} {params.fasta} {input.R1} {input.R2} | samtools addreplacerg -r 'ID:{wildcards.run}.{wildcards.lane}' -r 'PU:{wildcards.run}.{wildcards.lane}.{wildcards.index}' -r 'PL:illumina' -r 'LB:{params.LB}' -r 'SM:{wildcards.sample}' -@ {threads} - | samtools sort -n -@ {threads} -o {output}"
+        "bbsplit.sh -Xmx{params.memory} build=1 path={params.ref_p} in1={input.R1} in2={input.R2} out_x={output.x} out_y={output.y} refstats={output.refstats}"
 
-rule mouse_aln_pe:#species B
+#input is mess, write function
+rule reformat_repair:
     input:
-        unpack(get_fastqs)
+        unpack(disambiguated_fastqs)
     output:
-        temp("bam_input/work/{sample}/mm10/{run}/{lane}/{index}/mapped.bam")
+        R1="bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/R1.fastq.gz",
+        R2="bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/R2.fastq.gz"
     params:
-        LB=config['resources']['library_key'],
-        fasta=config['disambiguate']['fasta']#ref_key could get the fastq
-    threads:
-        8
-    shell:
-        #fastq config has no path.
-        "bwa mem -M -t {threads} {params.fasta} {input.R1} {input.R2} | samtools addreplacerg -r 'ID:{wildcards.run}.{wildcards.lane}' -r 'PU:{wildcards.run}.{wildcards.lane}.{wildcards.index}' -r 'PL:illumina' -r 'LB:{params.LB}' -r 'SM:{wildcards.sample}' -@ {threads} - | samtools sort -n -@ {threads} -o {output}"
-
-#input has been changed so it is name sorted
-rule disambiguate:
-    input:
-        A="bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/mapped.bam",
-        B="bam_input/work/{sample}/mm10/{run}/{lane}/{index}/mapped.bam"
-    output:
-        A=temp("bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/mapped.disambiguatedSpeciesA.bam"),
-        B=temp("bam_input/work/{sample}/mm10/{run}/{lane}/{index}/mapped.disambiguatedSpeciesB.bam")
-    params:
-        work_dir="bam_input/work/{sample}/disambres",
-        A=temp("bam_input/work/{sample}/disambres/mapped.disambiguatedSpeciesA.bam"),
-        B=temp("bam_input/work/{sample}/disambres/mapped.disambiguatedSpeciesB.bam")
+        memory="10240m"
     shell:
         """
-        python disambiguate.py -i {params.work_dir} -o {params.work_dir} -a bwa --no-sort {input.A} {input.B}
-        rsync {params.A} {output.A}
-        #samtools index {output.A}
-        rsync {params.B} {output.B}
-        #samtools index {output.B}
+        reformat.sh -Xmx{params.memory} int=t addcolon=t uniquenames=t in={input.x} out=stdout.fq |
+        repair.sh -Xmx{params.memory} in=stdin.fq out1={output.R1} out2={output.R2}
         """
-'''
-#BBSplit
-#Written by Brian Bushnell, from Dec. 2010 - present
-#Last modified June 11, 2018
 
-#Description:  Maps reads to multiple references simultaneously.
-#Outputs reads to a file for the reference they best match, with multiple options for dealing with ambiguous mappings.
-
-#To index:     bbsplit.sh build=<1> ref_x=<reference fasta> ref_y=<another reference fasta>
-#To map:       bbsplit.sh build=<1> in=<reads> out_x=<output file> out_y=<another output file>
-
-#To be concise, and do everything in one command:
-#bbsplit.sh ref=x.fa,y.fa in=reads.fq basename=o%.fq
-
-#that is equivalent to
-#bbsplit.sh build=1 in=reads.fq ref_x=x.fa ref_y=y.fa out_x=ox.fq out_y=oy.fq
-
-#By default paired reads will yield interleaved output, but you can use the # symbol to produce twin output files.
-#For example, basename=o%_#.fq will produce ox_1.fq, ox_2.fq, oy_1.fq, and oy_2.fq.
-
-#Indexing Parameters (required when building the index):
-#ref=<file,file>     A list of references, or directories containing fasta files.
-#ref_<name>=<ref.fa> Alternate, longer way to specify references. e.g., ref_ecoli=ecoli.fa
-#                    These can also be comma-delimited lists of files; e.g., ref_a=a1.fa,a2.fa,a3.fa
-#build=<1>           If multiple references are indexed in the same directory, each needs a unique build ID.
-#path=<.>            Specify the location to write the index, if you dont want it in the current working directory.
-
-#Input Parameters:
-#build=<1>           Designate index to use.  Corresponds to the number specified when building the index.
-#in=<reads.fq>       Primary reads input; required parameter.
-#in2=<reads2.fq>     For paired reads in two files.
-'''
-
-#Verify I need this after I fixed no-sort issue
-#bams SHOULD be name sorted and they were not
-rule reformat_and_repair:
-    input:
-        "bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/mapped.disambiguatedSpeciesA.bam"
-    output:
-        R1=temp("bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/disambiguated_R1.fastq"),
-        R2=temp("bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/disambiguated_R2.fastq")
-    params:
-        qsort=temp("bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/qSortA.bam")
-    shell:
-        """
-        #samtools sort -n -o {params.qsort} {input}
-        reformat.sh -Xmx5g in={input} out=stdout.fq |
-        reformat.sh -Xmx5g int=t addcolon=t uniquenames=t in=stdin.fq out=stdout.fq |
-        repair.sh -Xmx5g in=stdin.fq out1={output.R1} out2={output.R2}
-        """
-#add bwa if above benefits form multithread
-
-#Note this one is coordinate sorted
 rule aln_pe:
     input:
-        R1="bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/disambiguated_R1.fastq",
-        R2="bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/disambiguated_R2.fastq"
+        R1="bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/R1.fastq.gz",
+        R2="bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/R2.fastq.gz"
     output:
-        temp("bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/disambiguated.bam")
+        temp("bam_input/work/{sample}/GRCh37/{run}/{lane}/{index}/mapped.bam")
     params:
         LB=config['resources']['library_key'],
         fasta=config['reference']['fasta']

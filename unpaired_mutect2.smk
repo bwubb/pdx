@@ -169,4 +169,4 @@ rule run_annovartools_mutect2:
         header='/home/bwubb/resources/annovar/annotation-header.20210208.txt',
         mode='single'
     shell:
-        'python annovartools.v03.py -I {input} -O {output} --header {params.header} -m {params.mode} {wildcards.tumor}'
+        'python annovartools.v04.py -I {input} -O {output} --header {params.header} -m {params.mode} {wildcards.tumor}'
