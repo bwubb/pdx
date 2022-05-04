@@ -17,7 +17,7 @@ def get_fastqs(wildcards):
     #fastq.yaml does not currently include file paths.
 
 def disambiguated_fastqs(wildcards):
-    return {'x':f"bam_input/work/{wildcards.sample}/disambiguate/{wildcards.sample}_{config['resources']['targets_key']}_{wildcards.run}_{wildcards.lane}_{wildcards.index}.{config['reference']['key']}.fastq.gz",'y':f"bam_input/work/{wildcards.sample}/disambiguate/{wildcards.sample}_{config['resources']['targets_key']}_{wildcards.run}_{wildcards.lane}_{wildcards.index}.{config['disambiguate']['key']}.fastq.gz"}
+    return {'x':f"bam_input/work/{wildcards.sample}/bbtools/{wildcards.sample}_{config['resources']['targets_key']}_{wildcards.run}_{wildcards.lane}_{wildcards.index}.{config['reference']['key']}.fastq.gz",'y':f"bam_input/work/{wildcards.sample}/bbtools/{wildcards.sample}_{config['resources']['targets_key']}_{wildcards.run}_{wildcards.lane}_{wildcards.index}.{config['disambiguate']['key']}.fastq.gz"}
 
 ### ### PYTHON ### ###
 
@@ -42,8 +42,8 @@ rule bbsplit:
     input:
         unpack(get_fastqs)
     output:
-        x="bam_input/work/{sample}/disambiguate/{sample}_{lib}_{run}_{lane}_{index}.GRCh37.fastq.gz",
-        y="bam_input/work/{sample}/disambiguate/{sample}_{lib}_{run}_{lane}_{index}.mm10.fastq.gz",
+        x="bam_input/work/{sample}/bbtools/{sample}_{lib}_{run}_{lane}_{index}.GRCh37.fastq.gz",
+        y="bam_input/work/{sample}/bbtools/{sample}_{lib}_{run}_{lane}_{index}.mm10.fastq.gz",
         refstats="metrics/{sample}/{sample}_{lib}_{run}_{lane}_{index}.refstats"
     params:
         ref_p=config['disambiguate']['ref_p'],
@@ -223,5 +223,3 @@ rule ready_bam:
         rsync -v {input.bam} {output}
         samtools index {output}
         """
-
-
