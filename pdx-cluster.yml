@@ -1,16 +1,19 @@
 '__default__':
-    'Mem': '12288'
-    'nt': '1'
-    'Job': '{wildcards.sample}_{rule}'
+    'M': '12288'
+    'n': '1'
+    'J': '{wildcards.sample}_{rule}'
     'oo': 'logs/cluster/{wildcards.sample}/{rule}.o'
     'eo': 'logs/cluster/{wildcards.sample}/{rule}.e'
-    'usage': '"span [hosts=1] rusage [mem=12288]"'
+    'R': '"span [hosts=1] rusage [mem=12288]"'
 'bbsplit':
-    'Mem': '65536'
-    'nt': '8'
-    'usage': '"span [hosts=1] rusage [mem=65536]"'
-'aln_pe':
-    'Mem': '65536'
-    'nt': '8'
-    'usage': '"span [hosts=1] rusage [mem=65536]"'
-
+    'M': '65536'
+    'n': '4'
+    'R': '"span [hosts=1] rusage [mem=65536]"'
+'bwa_mem':
+    'M': '65536'
+    'n': '4'
+    'R': '"span [hosts=1] rusage [mem=65536]"'
+'samtools_readgroup':
+    'M': '12288'
+    'n': '4'
+    'R': '"span [hosts=1] rusage [mem=12288]"'

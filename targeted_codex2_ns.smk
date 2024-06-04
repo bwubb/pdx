@@ -29,6 +29,7 @@ rule CODEX2_ns:
     params:
         project="data/work/{project}/codex2",
         bed=config['resources']['targets_bed'],
-        normals=config['project']['normal_list']
-    script:
-        "codex2_ns_targeted.R"
+        normals=config['project']['normal_list'],
+        bam_table=config['project']['bam_table']
+    shell:
+        "Rscript codex2_ns_targeted.R --bed_file {params.bed} --normal_list {params.normals} --bam_table {params.bam_table} --output_dir {params.project}"
